@@ -164,14 +164,54 @@ You may also need to change the flashloan provider used in the contract to one t
 
 ## Kronos volatility observer (optional)
 
-Logs a Kronos-small volatility forecast next to every observed spread in `logs/observations.jsonl`. It never changes trade decisions.
+Phase 1, observation only: logs a Kronos-small volatility forecast next to every observed spread in `logs/observations.jsonl`. The suggested threshold is logged, never applied; trade decisions are unchanged.
+
+### Service setup (Python 3.10+, tested on 3.12)
 
 ```bash
 cd forecast
 python3 -m venv .venv && . .venv/bin/activate
+pip install torch --index-url https://download.pytorch.org/whl/cpu   # CPU torch first
 pip install -r requirements.txt
-./setup_kronos.sh
+./setup_kronos.sh                    # clones Kronos at a pinned commit into forecast/vendor/
 python -m kronos_service.main        # serves http://127.0.0.1:8001/forecast
 ```
 
-Then set `FORECAST_URL` in `.env` and start the bot as usual. Leave it empty to disable.
+The first run downloads the model weights from Hugging Face, and the first refresh takes about 70 s on CPU (`/forecast` answers 503 until it finishes). Check readiness with:
+
+```bash
+curl http://127.0.0.1:8001/health
+```
+
+Service environment variables (all optional):
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `KRONOS_SYMBOL` | `SHIBUSDT` | Binance symbol to forecast |
+| `KRONOS_INTERVAL` | `5m` | Candle interval (`1m`, `5m`, `15m`, `1h`) |
+| `KRONOS_LOOKBACK` | `400` | Candles of history fed to the model (1-512) |
+| `KRONOS_PRED_LEN` | `12` | Candles to predict (1 to lookback) |
+| `KRONOS_SAMPLE_COUNT` | `5` | Samples averaged per prediction |
+| `KRONOS_REFRESH_SECONDS` | `300` | Seconds between forecast refreshes |
+| `KRONOS_PORT` | `8001` | Listen port (binds 127.0.0.1) |
+| `KRONOS_DEVICE` | auto | Torch device, e.g. `cpu` |
+| `KRONOS_CANDLES_URL` | `https://data-api.binance.vision/api/v3/klines` | Klines endpoint; override if Binance returns HTTP 451 in your region |
+| `KRONOS_VENDOR_PATH` | `forecast/vendor/Kronos` | Where Kronos was cloned |
+
+### Bot setup
+
+In `.env`, set `FORECAST_URL` (must be `http://`, e.g. `http://127.0.0.1:8001/forecast`) and optionally `FORECAST_MAX_AGE_MIN` (default 15; must be a positive number). Leave `FORECAST_URL` empty to disable: the bot behaves exactly as before and writes no observations. An invalid `FORECAST_URL` or `FORECAST_MAX_AGE_MIN` disables the integration with a `Forecast: disabled (...)` line at startup. If the service is down, slow or stale, the bot keeps using the fixed `PRICE_DIFFERENCE`.
+
+### Observation record
+
+One JSON line per observed spread in `logs/observations.jsonl`:
+
+- `observed_at`: ISO timestamp of the observation.
+- `block`: block number of the swap.
+- `price_difference_pct`: Uniswap vs Sushiswap spread (signed).
+- `base_threshold_pct`: the configured `PRICE_DIFFERENCE`.
+- `suggested_threshold_pct`: base threshold scaled by `vol_ratio` (clamped to 0.5x-2x); equals the base when there is no forecast. Logged only.
+- `forecast_generated_at`: when the forecast used was produced (null if none).
+- `vol_ratio`: predicted range / recent historical range (null if none).
+- `predicted_range_pct`, `historical_range_pct`: mean high-low range as % of close over the horizon.
+- `forecast_status`: `ok` (fresh forecast attached), `stale` (a forecast was cached but is older than `FORECAST_MAX_AGE_MIN`), or `unavailable` (never received one, or the service is unreachable).
