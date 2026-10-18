@@ -9,7 +9,7 @@ const { uFactory, uRouter, sFactory, sRouter, web3, arbitrage } = require('./hel
 const Big = require('big.js')
 const { optimalInput, estimateProfit, mapReserves } = require('./helpers/arbitrage-math')
 const path = require('path')
-const { createForecastClient } = require('./helpers/forecast-client')
+const { createForecastClient, parseForecastConfig } = require('./helpers/forecast-client')
 const { buildObservation, appendObservation } = require('./helpers/observation')
 
 // -- .ENV VALUES HERE -- //
@@ -21,11 +21,10 @@ const units = process.env.UNITS // Used for price display/reporting
 const difference = process.env.PRICE_DIFFERENCE
 const gas = process.env.GAS_LIMIT
 const estimatedGasCost = process.env.GAS_PRICE // Estimated Gas: 0.008453220000006144 ETH + ~10%
-const forecastClient = process.env.FORECAST_URL
-    ? createForecastClient({
-        url: process.env.FORECAST_URL,
-        maxAgeMs: Number(process.env.FORECAST_MAX_AGE_MIN || 15) * 60 * 1000,
-    })
+const forecastConfig = parseForecastConfig(process.env)
+if (forecastConfig.error) console.log(`Forecast: disabled (${forecastConfig.error})\n`)
+const forecastClient = forecastConfig.url
+    ? createForecastClient({ url: forecastConfig.url, maxAgeMs: forecastConfig.maxAgeMs })
     : null
 const observationsPath = path.join(__dirname, 'logs', 'observations.jsonl')
 
@@ -130,13 +129,18 @@ const checkPrice = async (exchange, token0, token1) => {
 
 // Phase 1 (observation only): the suggested threshold is logged, never applied.
 const logObservation = (block, priceDifference) => {
-    const forecast = forecastClient ? forecastClient.latest() : null
-    const record = buildObservation({ nowMs: Date.now(), block, priceDifference, baseThreshold: difference, forecast })
-
     if (!forecastClient) {
         console.log(`Forecast: disabled\n`)
-    } else if (!forecast) {
-        console.log(`Forecast: unavailable (${forecastClient.lastError() || 'stale'}) — using fixed PRICE_DIFFERENCE\n`)
+        return
+    }
+
+    const nowMs = Date.now()
+    const forecast = forecastClient.latest(nowMs)
+    const forecastStatus = forecastClient.status(nowMs)
+    const record = buildObservation({ nowMs, block, priceDifference, baseThreshold: difference, forecast, forecastStatus })
+
+    if (!forecast) {
+        console.log(`Forecast: ${forecastStatus} (${forecastClient.lastError() || 'stale'}) — using fixed PRICE_DIFFERENCE\n`)
     } else {
         console.log(`Forecast: vol_ratio ${forecast.vol_ratio} → suggested threshold ${record.suggested_threshold_pct}% (not applied)\n`)
     }

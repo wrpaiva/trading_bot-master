@@ -12,7 +12,7 @@ function suggestThreshold(base, forecast) {
     return Number((baseThreshold * factor).toFixed(4))
 }
 
-function buildObservation({ nowMs, block, priceDifference, baseThreshold, forecast }) {
+function buildObservation({ nowMs, block, priceDifference, baseThreshold, forecast, forecastStatus }) {
     return {
         observed_at: new Date(nowMs).toISOString(),
         block,
@@ -23,6 +23,7 @@ function buildObservation({ nowMs, block, priceDifference, baseThreshold, foreca
         vol_ratio: forecast ? forecast.vol_ratio : null,
         predicted_range_pct: forecast ? forecast.predicted_range_pct : null,
         historical_range_pct: forecast ? forecast.historical_range_pct : null,
+        forecast_status: forecastStatus,
     }
 }
 

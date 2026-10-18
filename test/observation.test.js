@@ -25,7 +25,7 @@ assert.strictEqual(suggestThreshold(0.5, { vol_ratio: NaN }), 0.5, 'NaN ratio')
 // Test 3: observation record with and without forecast.
 const nowMs = Date.parse('2026-10-18T12:00:00Z')
 assert.deepStrictEqual(
-    buildObservation({ nowMs, block: 123, priceDifference: '-0.62', baseThreshold: '0.50', forecast }),
+    buildObservation({ nowMs, block: 123, priceDifference: '-0.62', baseThreshold: '0.50', forecast, forecastStatus: 'ok' }),
     {
         observed_at: '2026-10-18T12:00:00.000Z',
         block: 123,
@@ -36,13 +36,15 @@ assert.deepStrictEqual(
         vol_ratio: 1.5,
         predicted_range_pct: 0.6,
         historical_range_pct: 0.4,
+        forecast_status: 'ok',
     },
     'observation with forecast'
 )
-const bare = buildObservation({ nowMs, block: 1, priceDifference: '0.10', baseThreshold: '0.50', forecast: null })
+const bare = buildObservation({ nowMs, block: 1, priceDifference: '0.10', baseThreshold: '0.50', forecast: null, forecastStatus: 'stale' })
 assert.strictEqual(bare.suggested_threshold_pct, 0.5, 'bare suggested threshold')
 assert.strictEqual(bare.forecast_generated_at, null, 'bare generated_at')
 assert.strictEqual(bare.vol_ratio, null, 'bare vol_ratio')
+assert.strictEqual(bare.forecast_status, 'stale', 'bare status')
 
 // Test 4: append creates the directory and writes one JSON line per call.
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'obs-'))

@@ -1,6 +1,6 @@
 const assert = require('assert')
 const http = require('http')
-const { fetchJson, isFresh, createForecastClient } = require('../helpers/forecast-client')
+const { fetchJson, isFresh, createForecastClient, parseForecastConfig } = require('../helpers/forecast-client')
 
 const NOW = Date.parse('2026-10-18T12:00:00Z')
 const MIN = 60 * 1000
@@ -109,6 +109,34 @@ async function run() {
     overlapping.poll()
     await new Promise(r => setTimeout(r, 100))
     assert.strictEqual(fetchCalls, 1, 'overlap guard prevents concurrent fetches')
+
+    // Test 10: bad URLs reject, and no uncaught throw happens after the deadline.
+    await assert.rejects(fetchJson('https://127.0.0.1:1/x', 200), 'https url rejects')
+    await assert.rejects(fetchJson('127.0.0.1:1/x', 200), 'scheme-less url rejects')
+    await new Promise(r => setTimeout(r, 400))
+
+    // Test 11: parseForecastConfig validates FORECAST_URL and FORECAST_MAX_AGE_MIN.
+    assert.deepStrictEqual(parseForecastConfig({}), { disabled: true }, 'unset url disables')
+    assert.deepStrictEqual(parseForecastConfig({ FORECAST_URL: '' }), { disabled: true }, 'empty url disables')
+    assert.deepStrictEqual(
+        parseForecastConfig({ FORECAST_URL: 'http://127.0.0.1:8001/forecast' }),
+        { url: 'http://127.0.0.1:8001/forecast', maxAgeMs: 15 * MIN }, 'default max age')
+    assert.deepStrictEqual(
+        parseForecastConfig({ FORECAST_URL: 'http://127.0.0.1:8001/forecast', FORECAST_MAX_AGE_MIN: '2.5' }),
+        { url: 'http://127.0.0.1:8001/forecast', maxAgeMs: 150000 }, 'custom max age')
+    for (const bad of ['https://127.0.0.1:8001/forecast', '127.0.0.1:8001/forecast', 'nonsense']) {
+        assert.match(parseForecastConfig({ FORECAST_URL: bad }).error, /FORECAST_URL/, `bad url ${bad}`)
+    }
+    for (const bad of ['abc', '0', '-5', 'Infinity', 'NaN']) {
+        assert.match(
+            parseForecastConfig({ FORECAST_URL: 'http://127.0.0.1:8001/f', FORECAST_MAX_AGE_MIN: bad }).error,
+            /FORECAST_MAX_AGE_MIN/, `bad max age ${bad}`)
+    }
+
+    // Test 12: status distinguishes ok / stale / unavailable.
+    assert.strictEqual(flaky.status(NOW), 'ok', 'status ok')
+    assert.strictEqual(flaky.status(NOW + 30 * MIN), 'stale', 'status stale')
+    assert.strictEqual(down.status(NOW), 'unavailable', 'status unavailable')
 
     console.log('All forecast-client tests passed')
 }
