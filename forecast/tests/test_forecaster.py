@@ -81,3 +81,45 @@ def test_build_forecast_feeds_last_lookback_candles_and_future_timestamps():
 def test_rejects_short_history():
     with pytest.raises(ValueError, match="need 10 candles, got 4"):
         run(make_candles(4), FakePredictor())
+
+
+class RelativeDoublingPredictor:
+    """Returns the last input close x2 (scale-relative), so it is correct at any price scale."""
+
+    def __init__(self):
+        self.kwargs = None
+
+    def predict(self, **kwargs):
+        self.kwargs = kwargs
+        n = kwargs["pred_len"]
+        last = kwargs["df"]["close"].iloc[-1]
+        return pd.DataFrame({
+            "open": [2 * last] * n,
+            "high": [2 * last * 1.02] * n,
+            "low": [2 * last * 0.98] * n,
+            "close": [2 * last] * n,
+            "volume": [1.0] * n,
+            "amount": [1.0] * n,
+        }, index=kwargs["y_timestamp"])
+
+
+def test_prices_are_rescaled_to_unit_scale_before_predict():
+    # Kronos z-scores with an absolute 1e-5 std epsilon, so tiny prices must be rescaled.
+    predictor = RelativeDoublingPredictor()
+    run(make_candles(15, close=5e-6), predictor)
+
+    df = predictor.kwargs["df"]
+    assert df["close"].iloc[-1] == pytest.approx(1.0)
+    assert df["high"].iloc[-1] == pytest.approx(1.005)
+    assert (df["volume"] == 100.0).all()
+    assert (df["amount"] == 100.0).all()
+
+
+def test_prediction_is_scaled_back_and_matches_unit_price_case():
+    tiny = run(make_candles(15, close=5e-6), RelativeDoublingPredictor())
+    unit = run(make_candles(15, close=1.0), RelativeDoublingPredictor())
+
+    assert tiny["last_close"] == pytest.approx(5e-6)
+    assert tiny["predicted_close"] == pytest.approx(1e-5)
+    assert tiny["vol_ratio"] == pytest.approx(unit["vol_ratio"])
+    assert tiny["predicted_range_pct"] == pytest.approx(unit["predicted_range_pct"])
