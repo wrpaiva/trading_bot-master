@@ -161,3 +161,17 @@ You may also need to change the flashloan provider used in the contract to one t
 
 - When starting ganache CLI, you'll want to fork using your chain's RPC URL and perhaps update the address of the account you want to unlock.
 - If testing out the *manipulatePrice.js* script, you'll also want to update the **UNLOCKED_ACCOUNT** variable and adjust **AMOUNT** as needed.
+
+## Kronos volatility observer (optional)
+
+Logs a Kronos-small volatility forecast next to every observed spread in `logs/observations.jsonl`. It never changes trade decisions.
+
+```bash
+cd forecast
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+./setup_kronos.sh
+python -m kronos_service.main        # serves http://127.0.0.1:8001/forecast
+```
+
+Then set `FORECAST_URL` in `.env` and start the bot as usual. Leave it empty to disable.

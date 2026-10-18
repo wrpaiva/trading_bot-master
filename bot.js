@@ -8,6 +8,9 @@ const { getTokenAndContract, getPairContract, calculatePrice, getEstimatedReturn
 const { uFactory, uRouter, sFactory, sRouter, web3, arbitrage } = require('./helpers/initialization')
 const Big = require('big.js')
 const { optimalInput, estimateProfit, mapReserves } = require('./helpers/arbitrage-math')
+const path = require('path')
+const { createForecastClient } = require('./helpers/forecast-client')
+const { buildObservation, appendObservation } = require('./helpers/observation')
 
 // -- .ENV VALUES HERE -- //
 
@@ -18,11 +21,20 @@ const units = process.env.UNITS // Used for price display/reporting
 const difference = process.env.PRICE_DIFFERENCE
 const gas = process.env.GAS_LIMIT
 const estimatedGasCost = process.env.GAS_PRICE // Estimated Gas: 0.008453220000006144 ETH + ~10%
+const forecastClient = process.env.FORECAST_URL
+    ? createForecastClient({
+        url: process.env.FORECAST_URL,
+        maxAgeMs: Number(process.env.FORECAST_MAX_AGE_MIN || 15) * 60 * 1000,
+    })
+    : null
+const observationsPath = path.join(__dirname, 'logs', 'observations.jsonl')
 
 let uPair, sPair, amount
 let isExecuting = false
 
 const main = async () => {
+    if (forecastClient) forecastClient.start()
+
     const { token0Contract, token1Contract, token0, token1 } = await getTokenAndContract(arbFor, arbAgainst)
     uPair = await getPairContract(uFactory, token0.address, token1.address)
     sPair = await getPairContract(sFactory, token0.address, token1.address)
@@ -111,7 +123,29 @@ const checkPrice = async (exchange, token0, token1) => {
     console.log(`SUSHISWAP | ${token1.symbol}/${token0.symbol}\t | ${sFPrice}\n`)
     console.log(`Percentage Difference: ${priceDifference}%\n`)
 
+    logObservation(currentBlock, priceDifference)
+
     return priceDifference
+}
+
+// Phase 1 (observation only): the suggested threshold is logged, never applied.
+const logObservation = (block, priceDifference) => {
+    const forecast = forecastClient ? forecastClient.latest() : null
+    const record = buildObservation({ nowMs: Date.now(), block, priceDifference, baseThreshold: difference, forecast })
+
+    if (!forecastClient) {
+        console.log(`Forecast: disabled\n`)
+    } else if (!forecast) {
+        console.log(`Forecast: unavailable (${forecastClient.lastError() || 'stale'}) — using fixed PRICE_DIFFERENCE\n`)
+    } else {
+        console.log(`Forecast: vol_ratio ${forecast.vol_ratio} → suggested threshold ${record.suggested_threshold_pct}% (not applied)\n`)
+    }
+
+    try {
+        appendObservation(observationsPath, record)
+    } catch (error) {
+        console.log(`Could not write observation: ${error.message}\n`)
+    }
 }
 
 const determineDirection = async (priceDifference) => {
