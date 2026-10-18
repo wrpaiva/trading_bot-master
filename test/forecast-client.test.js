@@ -65,6 +65,51 @@ async function run() {
     await down.poll()
     assert.strictEqual(down.latest(NOW), null, 'no forecast when service is down')
 
+    // Test 7: invalid JSON body with 200 rejects.
+    const badJson = await listen((req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end('not valid json {')
+    })
+    await assert.rejects(fetchJson(badJson.url, 1000), /SyntaxError/, 'invalid JSON rejects')
+    badJson.server.close()
+
+    // Test 8: slow-drip server that never ends must reject with total deadline.
+    const slowDrip = await listen((req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        let tick = 0
+        const interval = setInterval(() => {
+            tick += 1
+            res.write('x')
+            if (tick > 100) {
+                clearInterval(interval)
+                res.destroy()
+            }
+        }, 50)
+        req.on('end', () => {
+            clearInterval(interval)
+            res.destroy()
+        })
+    })
+    const start = Date.now()
+    await assert.rejects(fetchJson(slowDrip.url, 200), /timeout/, 'slow drip timeout')
+    const elapsed = Date.now() - start
+    assert.ok(elapsed < 2000, `timeout should fire quickly, took ${elapsed}ms`)
+    slowDrip.server.close()
+
+    // Test 9: overlap guard: poll() invoked twice must invoke fetch only once if first is still pending.
+    let fetchCalls = 0
+    const overlapping = createForecastClient({
+        url: 'unused',
+        fetch: async () => {
+            fetchCalls += 1
+            return new Promise(() => { /* never resolves */ })
+        },
+    })
+    overlapping.poll()
+    overlapping.poll()
+    await new Promise(r => setTimeout(r, 100))
+    assert.strictEqual(fetchCalls, 1, 'overlap guard prevents concurrent fetches')
+
     console.log('All forecast-client tests passed')
 }
 
