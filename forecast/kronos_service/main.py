@@ -11,14 +11,26 @@ INTERVAL_MINUTES = {"1m": 1, "5m": 5, "15m": 15, "1h": 60}
 MAX_CONTEXT = 512
 
 
+def _env_int(name, default, minimum, maximum=None):
+    raw = os.environ.get(name, str(default))
+    bound = f"at least {minimum}" if maximum is None else f"between {minimum} and {maximum}"
+    try:
+        value = int(raw)
+    except ValueError:
+        raise SystemExit(f"{name} must be an integer {bound}, got {raw!r}") from None
+    if value < minimum or (maximum is not None and value > maximum):
+        raise SystemExit(f"{name} must be an integer {bound}, got {raw!r}")
+    return value
+
+
 def main():
     symbol = os.environ.get("KRONOS_SYMBOL", "SHIBUSDT")
     interval = os.environ.get("KRONOS_INTERVAL", "5m")
-    lookback = int(os.environ.get("KRONOS_LOOKBACK", "400"))
-    pred_len = int(os.environ.get("KRONOS_PRED_LEN", "12"))
-    sample_count = int(os.environ.get("KRONOS_SAMPLE_COUNT", "5"))
-    refresh_seconds = int(os.environ.get("KRONOS_REFRESH_SECONDS", "300"))
-    port = int(os.environ.get("KRONOS_PORT", "8001"))
+    lookback = _env_int("KRONOS_LOOKBACK", 400, 1, MAX_CONTEXT)
+    pred_len = _env_int("KRONOS_PRED_LEN", 12, 1, lookback)
+    sample_count = _env_int("KRONOS_SAMPLE_COUNT", 5, 1)
+    refresh_seconds = _env_int("KRONOS_REFRESH_SECONDS", 300, 1)
+    port = _env_int("KRONOS_PORT", 8001, 1, 65535)
     device = os.environ.get("KRONOS_DEVICE") or None
     candles_url = os.environ.get("KRONOS_CANDLES_URL", DEFAULT_URL)
     default_vendor = os.path.join(os.path.dirname(__file__), "..", "vendor", "Kronos")
@@ -26,8 +38,6 @@ def main():
 
     if interval not in INTERVAL_MINUTES:
         raise SystemExit(f"KRONOS_INTERVAL must be one of {sorted(INTERVAL_MINUTES)}, got {interval!r}")
-    if not 1 <= lookback <= MAX_CONTEXT:
-        raise SystemExit(f"KRONOS_LOOKBACK must be between 1 and {MAX_CONTEXT}, got {lookback}")
     if not os.path.isdir(os.path.join(vendor_path, "model")):
         raise SystemExit(f"Kronos not found at {vendor_path}; run forecast/setup_kronos.sh")
 
