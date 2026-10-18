@@ -135,3 +135,25 @@ def test_build_forecast_rejects_non_finite_output(bad):
 
     with pytest.raises(ValueError, match="non-finite"):
         run(make_candles(15), BadPredictor())
+
+
+def test_series_holds_recent_history_and_prediction_in_original_units():
+    candles = make_candles(150, close=5e-6)
+    result = build_forecast(
+        candles, FakePredictor(),
+        symbol="SHIBUSDT", interval_minutes=5, lookback=120, pred_len=3,
+        sample_count=2, now=NOW, model="Kronos-small",
+    )
+    series = result["series"]
+
+    assert len(series["history"]) == 96
+    assert len(series["predicted"]) == 3
+    assert series["history"][-1] == ["2026-10-18T12:25:00Z", 5e-6, pytest.approx(5.025e-6), pytest.approx(4.975e-6), 5e-6]
+    assert series["predicted"][0][0] == "2026-10-18T12:30:00Z"
+    # FakePredictor returns unit-scale 2.0 for a unit-scale input, i.e. 2 × last close.
+    assert series["predicted"][0][4] == pytest.approx(1e-5)
+
+
+def test_series_history_is_capped_by_lookback():
+    result = run(make_candles(15), FakePredictor())
+    assert len(result["series"]["history"]) == 10

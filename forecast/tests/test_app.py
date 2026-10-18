@@ -60,3 +60,32 @@ def test_background_thread_runs_first_refresh_on_startup():
             time.sleep(0.02)
         assert client.get("/forecast").json() == FORECAST
     assert len(calls) == 1
+
+
+SERIES = {"history": [["2026-10-18T11:55:00Z", 1.0, 1.1, 0.9, 1.05]], "predicted": [["2026-10-18T12:00:00Z", 1.05, 1.1, 1.0, 1.08]]}
+WITH_SERIES = {**FORECAST, "interval_minutes": 5, "series": SERIES}
+
+
+def test_forecast_omits_series_and_candles_serves_it():
+    app, client = make_client()
+    app.state.cache.refresh(lambda: WITH_SERIES)
+
+    assert "series" not in client.get("/forecast").json()
+    candles = client.get("/candles")
+    assert candles.status_code == 200
+    assert candles.json() == {"symbol": "SHIBUSDT", "generated_at": "2026-10-18T12:00:00Z", "interval_minutes": 5, **SERIES}
+
+
+def test_candles_is_503_before_first_refresh():
+    _, client = make_client()
+    response = client.get("/candles")
+    assert response.status_code == 503
+    assert response.json() == {"error": "forecast not ready"}
+
+
+def test_chart_page_is_served_as_html():
+    _, client = make_client()
+    response = client.get("/chart")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert "/candles" in response.text

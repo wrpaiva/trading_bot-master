@@ -7,6 +7,14 @@ from kronos_service.volatility import range_pct, vol_ratio
 
 FEATURES = ["open", "high", "low", "close", "volume", "amount"]
 PRICE_COLUMNS = ["open", "high", "low", "close"]
+CHART_HISTORY = 96  # 8 hours of 5-minute candles for the /chart page
+
+
+def _ohlc_rows(timestamps, frame):
+    return [
+        [ts.strftime("%Y-%m-%dT%H:%M:%SZ"), *(float(frame[col].iloc[i]) for col in PRICE_COLUMNS)]
+        for i, ts in enumerate(timestamps)
+    ]
 
 
 def build_forecast(candles, predictor, *, symbol, interval_minutes, lookback, pred_len, sample_count, now, model):
@@ -55,11 +63,20 @@ def build_forecast(candles, predictor, *, symbol, interval_minutes, lookback, pr
         "model": model,
     }
 
+    chart_history = history.tail(CHART_HISTORY).reset_index(drop=True)
+    series = {
+        "history": _ohlc_rows(chart_history["timestamps"], chart_history),
+        "predicted": _ohlc_rows(y_timestamp, predicted),
+    }
+
     # NaN/inf cannot be serialized as JSON; reject so the cache keeps the last good forecast.
     # vol_ratio may legitimately be None (no historical range).
     for key, value in result.items():
         if isinstance(value, float) and not math.isfinite(value):
             raise ValueError(f"non-finite forecast value for {key}: {value}")
+    if not all(math.isfinite(price) for row in series["predicted"] for price in row[1:]):
+        raise ValueError("non-finite predicted candle")
+    result["series"] = series
     return result
 
 

@@ -1,8 +1,11 @@
 import threading
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+
+CHART_HTML = (Path(__file__).parent / "chart.html").read_text(encoding="utf-8")
 
 
 class ForecastCache:
@@ -47,12 +50,33 @@ def create_app(refresh_fn, interval_seconds, start_background=True):
     app = FastAPI(title="kronos-forecast", lifespan=lifespan)
     app.state.cache = cache
 
+    def not_ready(snap):
+        return JSONResponse(status_code=503, content={"error": snap["last_error"] or "forecast not ready"})
+
     @app.get("/forecast")
     def get_forecast():
         snap = cache.snapshot()
         if snap["forecast"] is None:
-            return JSONResponse(status_code=503, content={"error": snap["last_error"] or "forecast not ready"})
-        return snap["forecast"]
+            return not_ready(snap)
+        # The candle series is only for /candles; keep the bot's payload small.
+        return {key: value for key, value in snap["forecast"].items() if key != "series"}
+
+    @app.get("/candles")
+    def get_candles():
+        snap = cache.snapshot()
+        forecast = snap["forecast"]
+        if forecast is None:
+            return not_ready(snap)
+        return {
+            "symbol": forecast["symbol"],
+            "generated_at": forecast["generated_at"],
+            "interval_minutes": forecast["interval_minutes"],
+            **forecast.get("series", {"history": [], "predicted": []}),
+        }
+
+    @app.get("/chart", response_class=HTMLResponse)
+    def chart():
+        return CHART_HTML
 
     @app.get("/health")
     def health():

@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kronos chart</title>
+<style>
+  /* Layout: summary strip on top, full-width candle chart below; refreshes every 60 s. */
+  :root {
+    --bg: #f5f6f8; --surface: #ffffff; --fg: #18202c; --muted: #5d6878; --grid: #e3e7ee;
+    --up: #1f8a5b; --down: #c2453d; --forecast: #7a5ad6; --now: #9aa4b2;
+    --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f141b; --surface: #161d27; --fg: #e3e8ef; --muted: #96a1b2; --grid: #253041;
+      --up: #4cc38a; --down: #f0756b; --forecast: #b19af5; --now: #5f6b7c;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--sans); font-size: 14px; }
+  main { max-width: 1200px; margin-inline: auto; padding: 24px 16px 40px; display: grid; gap: 16px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 16px; }
+  h1 { margin: 0; font-size: 20px; font-weight: 650; }
+  .status { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .status.error { color: var(--down); }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1px; background: var(--grid); border: 1px solid var(--grid); border-radius: 8px; overflow: hidden; }
+  .tile { background: var(--surface); padding: 12px 14px; display: grid; gap: 2px; min-width: 0; }
+  .tile dt { font-size: 11px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+  .tile dd { margin: 0; font-family: var(--mono); font-size: 18px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .tile dd small { font-size: 12px; color: var(--muted); }
+  .chart { background: var(--surface); border: 1px solid var(--grid); border-radius: 8px; padding: 8px; overflow-x: auto; }
+  svg { display: block; width: 100%; min-width: 600px; height: 420px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 12px; color: var(--muted); }
+  .legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; background: var(--c); }
+  .note { font-size: 12px; color: var(--muted); max-width: 75ch; line-height: 1.5; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1 id="title">Kronos · previsão de candles</h1>
+    <span class="status" id="status">carregando…</span>
+  </header>
+
+  <dl class="tiles">
+    <div class="tile"><dt>vol_ratio</dt><dd id="vol">–</dd></div>
+    <div class="tile"><dt>Amplitude prevista</dt><dd id="pred-range">–</dd></div>
+    <div class="tile"><dt>Amplitude real recente</dt><dd id="hist-range">–</dd></div>
+    <div class="tile"><dt>Último fechamento</dt><dd id="last">–</dd></div>
+    <div class="tile"><dt>Fechamento previsto</dt><dd id="pred-close">–</dd></div>
+    <div class="tile"><dt>Gerada</dt><dd id="age">–</dd></div>
+  </dl>
+
+  <div class="chart"><svg id="svg" role="img" aria-label="Candles reais e previstos"></svg></div>
+
+  <div class="legend">
+    <span style="--c: var(--up)">alta</span>
+    <span style="--c: var(--down)">baixa</span>
+    <span style="--c: var(--forecast)">previsão do Kronos</span>
+    <span style="--c: var(--now)">agora (último candle fechado)</span>
+  </div>
+  <p class="note">Só observação: o threshold sugerido é registrado pelo bot e nunca aplicado. A previsão é a média de várias amostras do modelo; candles previstos individuais não são sinal de trade.</p>
+</main>
+
+<script>
+(function () {
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.getElementById('svg');
+  const $ = (id) => document.getElementById(id);
+  let generatedAt = null;
+
+  const fmtPrice = (v) => v.toExponential(4);
+  const fmtPct = (v) => v.toFixed(3) + '%';
+  const fmtTime = (iso) => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+  function el(name, attrs, parent) {
+    const node = document.createElementNS(NS, name);
+    for (const key in attrs) node.setAttribute(key, attrs[key]);
+    (parent || svg).appendChild(node);
+    return node;
+  }
+
+  function draw(data) {
+    svg.textContent = '';
+    const rows = data.history.map((r) => ({ r, predicted: false }))
+      .concat(data.predicted.map((r) => ({ r, predicted: true })));
+    if (!rows.length) return;
+
+    const W = Math.max(svg.clientWidth, 600), H = 420;
+    const pad = { l: 12, r: 92, t: 16, b: 28 };
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+
+    let lo = Infinity, hi = -Infinity;
+    rows.forEach(({ r }) => { lo = Math.min(lo, r[3], r[2]); hi = Math.max(hi, r[2], r[3]); });
+    const span = (hi - lo) || hi * 0.01;
+    lo -= span * 0.06; hi += span * 0.06;
+
+    const plotW = W - pad.l - pad.r, plotH = H - pad.t - pad.b;
+    const step = plotW / rows.length;
+    const x = (i) => pad.l + step * i + step / 2;
+    const y = (v) => pad.t + (hi - v) / (hi - lo) * plotH;
+
+    // Horizontal grid and price axis.
+    for (let k = 0; k <= 5; k++) {
+      const v = lo + (hi - lo) * k / 5;
+      el('line', { x1: pad.l, x2: W - pad.r, y1: y(v), y2: y(v), stroke: 'var(--grid)' });
+      const t = el('text', { x: W - pad.r + 8, y: y(v) + 4, fill: 'var(--muted)', 'font-size': 11, 'font-family': 'var(--mono)' });
+      t.textContent = fmtPrice(v);
+    }
+
+    // Time labels every ~12 candles.
+    rows.forEach(({ r }, i) => {
+      if (i % 12 !== 0) return;
+      const t = el('text', { x: x(i), y: H - 8, fill: 'var(--muted)', 'font-size': 11, 'text-anchor': 'middle' });
+      t.textContent = fmtTime(r[0]);
+    });
+
+    // "Now" divider between history and forecast.
+    const nowX = pad.l + step * data.history.length;
+    el('line', { x1: nowX, x2: nowX, y1: pad.t, y2: H - pad.b, stroke: 'var(--now)', 'stroke-dasharray': '4 4' });
+    el('rect', { x: nowX, y: pad.t, width: step * data.predicted.length, height: plotH, fill: 'var(--forecast)', 'fill-opacity': 0.06 });
+
+    rows.forEach(({ r, predicted }, i) => {
+      const [, open, high, low, close] = r;
+      const color = predicted ? 'var(--forecast)' : (close >= open ? 'var(--up)' : 'var(--down)');
+      const top = Math.min(high, low), bottom = Math.max(high, low);
+      el('line', { x1: x(i), x2: x(i), y1: y(bottom), y2: y(top), stroke: color, 'stroke-width': 1 });
+      const bodyTop = y(Math.max(open, close)), bodyBottom = y(Math.min(open, close));
+      const body = el('rect', {
+        x: x(i) - step * 0.32, width: Math.max(step * 0.64, 1),
+        y: bodyTop, height: Math.max(bodyBottom - bodyTop, 1), fill: color,
+      });
+      if (predicted) body.setAttribute('fill-opacity', 0.7);
+      const tip = el('title', {}, body);
+      tip.textContent = `${fmtTime(r[0])}${predicted ? ' (previsto)' : ''}\nO ${fmtPrice(open)}  H ${fmtPrice(high)}\nL ${fmtPrice(low)}  C ${fmtPrice(close)}`;
+    });
+  }
+
+  function renderSummary(f) {
+    $('title').textContent = `${f.symbol} · ${f.interval_minutes} min · ${f.model}`;
+    $('vol').textContent = f.vol_ratio == null ? 'n/d' : f.vol_ratio.toFixed(3);
+    $('pred-range').textContent = fmtPct(f.predicted_range_pct);
+    $('hist-range').textContent = fmtPct(f.historical_range_pct);
+    $('last').textContent = fmtPrice(f.last_close);
+    const change = (f.predicted_close / f.last_close - 1) * 100;
+    $('pred-close').innerHTML = `${fmtPrice(f.predicted_close)} <small>${change >= 0 ? '+' : ''}${change.toFixed(2)}% em ${f.horizon_minutes} min</small>`;
+    generatedAt = Date.parse(f.generated_at);
+    renderAge();
+  }
+
+  function renderAge() {
+    if (!generatedAt) return;
+    const minutes = Math.round((Date.now() - generatedAt) / 60000);
+    $('age').textContent = minutes <= 0 ? 'agora' : `há ${minutes} min`;
+  }
+
+  function setStatus(text, isError) {
+    const s = $('status');
+    s.textContent = text;
+    s.classList.toggle('error', !!isError);
+  }
+
+  async function getJson(path) {
+    const res = await fetch(path, { cache: 'no-store' });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    return body;
+  }
+
+  async function refresh() {
+    try {
+      const [forecast, candles] = await Promise.all([getJson('/forecast'), getJson('/candles')]);
+      renderSummary(forecast);
+      draw(candles);
+      setStatus(`atualizado ${new Date().toLocaleTimeString()} · próxima leitura em 60 s`);
+    } catch (err) {
+      setStatus(`sem previsão: ${err.message}`, true);
+    }
+  }
+
+  refresh();
+  setInterval(refresh, 60000);
+  setInterval(renderAge, 30000);
+  window.addEventListener('resize', () => refresh());
+})();
+</script>
+</body>
+</html>
