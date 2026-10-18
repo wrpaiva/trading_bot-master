@@ -25,13 +25,28 @@ ganache -f wss://eth-mainnet.alchemyapi.io/v2/<KEY> -m <mnemonic> -u 0xdEAD00000
 
 The `-u` account must hold the `ARB_AGAINST` token (default SHIB); change it if switching tokens.
 
-**Tests:** none exist. The `test/` dir is empty and `npm test` is a no-op stub — don't trust it as a signal.
+**Tests:** two suites, neither needs a chain.
+
+```bash
+npm test                                             # Node: arbitrage-math, forecast-client, observation
+cd forecast && .venv/bin/python -m pytest -q -W error   # Python kronos-service (keep it warning-free)
+```
+
+Node tests are plain `node` scripts using `assert` (no framework); add a new file to the `test` script in `package.json`. Nothing tests `bot.js` itself — it connects to web3 on `require`, so verify changes there with `node --check bot.js` plus a Ganache run.
+
+Optional Kronos forecast service (Python, see "Kronos volatility observer" below and the README for full setup):
+
+```bash
+cd forecast && ./setup_kronos.sh                   # clone Kronos at the pinned commit into forecast/vendor/
+cd forecast && .venv/bin/python -m kronos_service.main   # 127.0.0.1:8001 — /forecast, /health, /candles, /chart
+```
 
 ## Configuration split
 
 Two config sources, and knowing which lives where matters:
 
-- **`.env`** (copy from `.env.example`) — runtime/strategy values: `ARB_FOR`/`ARB_AGAINST` (token addresses), `ACCOUNT` (receives profit), `PRICE_DIFFERENCE` (spread % threshold), `GAS_LIMIT`/`GAS_PRICE`, `UNITS` (display precision), `ALCHEMY_API_KEY`.
+- **`.env`** (copy from `.env.example`) — runtime/strategy values: `ARB_FOR`/`ARB_AGAINST` (token addresses), `ACCOUNT` (receives profit), `PRICE_DIFFERENCE` (spread % threshold), `GAS_LIMIT`/`GAS_PRICE`, `UNITS` (display precision), `ALCHEMY_API_KEY`. Also `FORECAST_URL` (empty = Kronos observer off; must be `http://`) and `FORECAST_MAX_AGE_MIN` (default 15).
+- **`KRONOS_*` env vars** — read by the Python service only (`forecast/kronos_service/main.py`), not by the bot. Defaults are documented in the README.
 - **`config.json`** — exchange router/factory addresses plus two toggles under `PROJECT_SETTINGS`:
   - `isLocal` — `true` connects web3 to `ws://127.0.0.1:7545`; `false` connects to mainnet via Alchemy WSS.
   - `isDeployed` — when `false`, `executeTrade()` skips the on-chain contract call (monitor-only mode; no deployed contract needed).
@@ -41,12 +56,14 @@ Two config sources, and knowing which lives where matters:
 `bot.js` is the orchestrator with five functions forming a pipeline, re-entrancy-guarded by the `isExecuting` flag:
 
 1. `main()` — subscribes to `Swap` events on both the Uniswap and Sushiswap pair contracts.
-2. `checkPrice()` — reads reserves, computes the % price difference between exchanges.
+2. `checkPrice()` — reads reserves, computes the % price difference between exchanges, then calls `logObservation()` (Kronos observer; see below).
 3. `determineDirection()` — returns `[buyRouter, sellRouter]` if spread ≥ `PRICE_DIFFERENCE`, else `null`.
-4. `determineProfitability()` — the **strategy logic you customize** (~line 137). Uses `getAmountsIn`/`getAmountsOut` against reserves of the lower-liquidity pool to size the trade and estimate profit; returns bool and sets the module-level `amount`.
+4. `determineProfitability()` — the **strategy logic you customize**. Maps both pools' reserves to WETH/SHIB roles by token address (`mapReserves`), computes the closed-form profit-maximizing input `x*` (`optimalInput`; `x* <= 0` means no arbitrage after the 0.3% fees), estimates gross profit, subtracts the static `GAS_PRICE` estimate, and sets the module-level `amount` (integer wei) for the flash loan. Returns bool.
 5. `executeTrade()` — calls `arbitrage.executeTrade(...)` on-chain (only if `isDeployed`).
 
 Supporting modules:
+
+- `helpers/arbitrage-math.js` — pure `big.js` math (no web3): `optimalInput`, `estimateProfit`, `mapReserves`, `DEFAULT_FEE` (997/1000). Keep it RPC-free; it is what `test/arbitrage-math.test.js` covers.
 
 - `helpers/initialization.js` — builds the shared web3 instance and the Uniswap/Sushiswap factory + router contract objects, and the `arbitrage` contract. **Both this file and `helpers/helpers.js` independently create their own web3 connection** based on `config.isLocal`.
 - `helpers/helpers.js` — pure blockchain reads: token metadata, pair address lookup, reserves, price (`Big.js`), estimated return.
@@ -56,6 +73,24 @@ Contract (`contracts/Arbitrage.sol`, Solidity 0.8.9):
 
 - `Arbitrage extends DyDxFlashLoan`. `executeTrade()` initiates a DyDx flash loan; DyDx calls back into `callFunction()` which does the two swaps (buy on one router, sell on the other via `swapExactTokensForTokens`) and transfers profit to `owner`. `require(balanceAfter - balanceBefore == flashAmount ...)` enforces the loan arrived; the whole tx reverts if the round-trip isn't profitable enough to repay `flashAmount + 1`.
 - Constructor takes `(sRouter, uRouter)` — Sushiswap first. Migration `2_deploy_contracts.js` passes them in that order from `config.json`.
+
+## Kronos volatility observer (phase 1: observation only)
+
+Optional side path that logs a [Kronos](https://github.com/shiyu-coder/Kronos) volatility forecast next to every observed spread. **It must never change a trade decision**: the suggested threshold is logged, never read by `determineDirection()`.
+
+- `forecast/` — Python service (`kronos_service`): `candles.py` (Binance klines, drops the still-forming candle) → `forecaster.py` (`build_forecast`, Kronos-small) → `app.py` (FastAPI; a background thread refreshes every `KRONOS_REFRESH_SECONDS` and caches the last good forecast) → `main.py` (env parsing, model load, uvicorn on 127.0.0.1). `chart.html` is the `/chart` page (real vs predicted candles, no external libs).
+- `helpers/forecast-client.js` — polls `/forecast` off the hot path; `latest()` is a synchronous cache read, so the Swap handler never waits on the service. Uses `http`, not global `fetch` (Node 16 compatibility). `parseForecastConfig()` validates `FORECAST_URL`/`FORECAST_MAX_AGE_MIN`.
+- `helpers/observation.js` — `suggestThreshold` (`PRICE_DIFFERENCE × clamp(vol_ratio, 0.5, 2)`), `buildObservation`, `appendObservation` → `logs/observations.jsonl` (gitignored).
+- Contract: `/forecast` returns `symbol, interval_minutes, generated_at, horizon_minutes, predicted_range_pct, historical_range_pct, vol_ratio, last_close, predicted_close, model`. Changing a key means changing both the Python producer and the Node consumers.
+
+Gotchas specific to it:
+
+- **Kronos normalizes each column with an absolute `1e-5` epsilon** (`x_std + 1e-5`), which swamps sub-cent prices like SHIB (~5e-6). `build_forecast` divides OHLC by the last close before predicting and multiplies back afterwards — don't remove that, or `vol_ratio` becomes garbage (~70 instead of ~1).
+- `forecast/vendor/Kronos` is gitignored and cloned by `setup_kronos.sh` at a pinned commit; the service exits if it is missing.
+- Install CPU torch first (`pip install torch --index-url https://download.pytorch.org/whl/cpu`), or pip pulls multi-GB CUDA wheels. `numpy` stays `<2.0` for `pandas==2.2.2`; the test client needs `httpx2` (starlette ≥1.9).
+- A refresh takes ~70 s on CPU; `/forecast` and `/candles` answer 503 until the first one finishes.
+- `build_forecast` rejects NaN/inf output so the cache keeps the last good forecast and `/health` reports the error.
+- To stop a background service: `pkill -f '[k]ronos_service.main'` (the brackets keep `pkill` from matching your own shell).
 
 ## Gotchas
 
