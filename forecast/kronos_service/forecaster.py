@@ -1,3 +1,4 @@
+import math
 import sys
 
 import pandas as pd
@@ -41,7 +42,7 @@ def build_forecast(candles, predictor, *, symbol, interval_minutes, lookback, pr
     historical_range = range_pct(history.tail(pred_len))
     predicted_range = range_pct(predicted)
 
-    return {
+    result = {
         "symbol": symbol,
         "interval_minutes": interval_minutes,
         "generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -53,6 +54,13 @@ def build_forecast(candles, predictor, *, symbol, interval_minutes, lookback, pr
         "predicted_close": float(predicted["close"].iloc[-1]),
         "model": model,
     }
+
+    # NaN/inf cannot be serialized as JSON; reject so the cache keeps the last good forecast.
+    # vol_ratio may legitimately be None (no historical range).
+    for key, value in result.items():
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(f"non-finite forecast value for {key}: {value}")
+    return result
 
 
 def load_kronos_predictor(vendor_path, model_id, tokenizer_id, device=None, max_context=512):

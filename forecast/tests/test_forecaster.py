@@ -123,3 +123,15 @@ def test_prediction_is_scaled_back_and_matches_unit_price_case():
     assert tiny["predicted_close"] == pytest.approx(1e-5)
     assert tiny["vol_ratio"] == pytest.approx(unit["vol_ratio"])
     assert tiny["predicted_range_pct"] == pytest.approx(unit["predicted_range_pct"])
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+def test_build_forecast_rejects_non_finite_output(bad):
+    class BadPredictor(FakePredictor):
+        def predict(self, **kwargs):
+            df = super().predict(**kwargs)
+            df["high"] = bad
+            return df
+
+    with pytest.raises(ValueError, match="non-finite"):
+        run(make_candles(15), BadPredictor())
