@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node test/arbitrage-math.test.js"
+    "test": "node test/arbitrage-math.test.js && node test/forecast-client.test.js"
   },
   "author": "",
   "license": "ISC",
